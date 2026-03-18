@@ -1,1 +1,5 @@
 streamlit
+bs4
+google
+google-genai
+openai
