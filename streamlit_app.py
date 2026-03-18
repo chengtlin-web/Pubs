@@ -154,10 +154,13 @@ if df is not None:
 
         st.subheader(f"Publications ({len(pub_df)})")
         st.dataframe(
-            pub_df[["No.", "Year", "Title", "PubMed Link"]],
+            pub_df[["No.", "Year", "Title", "Abstract", "PubMed Link"]],
             column_config={
+                "No.": st.column_config.Column(width="small"),
+                "Year": st.column_config.NumberColumn(format="%d", width="small"),
+                "Title": st.column_config.Column(width=800), # Or a pixel value like 400
+                "Abstract": st.column_config.Column(width=1600), # Or 600+
                 "PubMed Link": st.column_config.LinkColumn("Link"),
-                "Year": st.column_config.NumberColumn(format="%d")
             },
             hide_index=True, use_container_width=True
         )
