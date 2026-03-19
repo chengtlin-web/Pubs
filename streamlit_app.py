@@ -8,8 +8,8 @@ from google import genai  # Your preferred import
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="FacultyScan", layout="wide", page_icon="🧬")
-ORCID_CLIENT_ID = 'APP-2LRNHFE202EQNXMJ'
-ORCID_CLIENT_SECRET = 'ed968a2b-ef1a-40a4-a3a2-cf10fcbac017'
+ORCID_CLIENT_ID = 'APP-VYOKD26NG7YD3EPW'
+ORCID_CLIENT_SECRET = '51ffc00e-d65c-4e64-8073-cefb9357a813'
 FILE_PATH = "data/pubs2.csv"
 
 # --- 2. DATA ENGINES ---
@@ -103,8 +103,21 @@ if df is not None:
         all_orcids = sorted(df['ORCID'].unique().tolist())
         selected_orcid = st.selectbox("Select ORCID", options=all_orcids, key="orcid_selector")
         
+        # 1. Automatically detect the current year
+        current_year = datetime.now().year
+        # 2. Calculate the start year for a 5-year window (e.g., 2022 to 2026)
+        five_years_ago = current_year - 4 
+
         st.divider()
-        year_range = st.slider("Year Range", int(df['Year'].min()), 2026, (2010, 2026))
+
+        # 3. Apply the dynamic values to the slider
+        year_range = st.slider(
+            "Year Range", 
+            min_value=int(df['Year'].min()), 
+            max_value=current_year, 
+            value=(five_years_ago, current_year)
+        )
+
         search_query = st.text_input("Filter Titles", "").lower()
 
     faculty = get_single_faculty_info(selected_orcid, ORCID_CLIENT_ID, ORCID_CLIENT_SECRET)
@@ -212,4 +225,4 @@ if df is not None:
             except Exception as e:
                 st.error(f"Gemini AI Error: {e}")
 else:
-    st.error("Data file (pubs2.csv) not found.")
+    st.error("Data file (pubs.csv) not found.")
