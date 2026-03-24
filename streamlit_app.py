@@ -187,7 +187,7 @@ if df is not None:
         else:
             try:
                 client = genai.Client(api_key=gemini_key)
-                model_id = "gemini-2.5-flashgemini-3.1-flash-lite-preview" # Updated to flash for speed
+                model_id = "gemini-2.5-flash" # Updated to flash for speed
 
                 # Prepare context
                 context_parts = [f"Name: {faculty['name']}", f"Bio: {bio}", f"Training: {', '.join(edu_list)}"]
