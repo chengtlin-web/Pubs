@@ -4,225 +4,226 @@ import numpy as np
 import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
-from google import genai  # Your preferred import
+from google import genai 
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="FacultyScan", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="FacultyScan Multi-Compare", layout="wide", page_icon="🧬")
 ORCID_CLIENT_ID = 'APP-VYOKD26NG7YD3EPW'
 ORCID_CLIENT_SECRET = '51ffc00e-d65c-4e64-8073-cefb9357a813'
-FILE_PATH = "data/pubs2.csv"
+PUBS_FILE = "data/pubs3.csv"
+PROFILES_FILE = "data/profiles.csv"
 
 # --- 2. DATA ENGINES ---
 
 @st.cache_data
-def load_local_data(path):
+def load_data():
     try:
-        df = pd.read_csv(path)
-        df['Year'] = pd.to_numeric(df['Year'], errors='coerce').fillna(0).astype(int)
-        df['ORCID'] = df['ORCID'].astype(str).str.strip()
-        return df
-    except Exception:
-        return None
+        df_pubs = pd.read_csv(PUBS_FILE)
+        df_pubs['Year'] = pd.to_numeric(df_pubs['Year'], errors='coerce').fillna(0).astype(int)
+        df_pubs['ORCID'] = df_pubs['ORCID'].astype(str).str.strip()
+        for col in ['Authors', 'Abstract']:
+            if col in df_pubs.columns:
+                df_pubs[col] = df_pubs[col].astype(str).replace('nan', 'N/A')
+            else:
+                df_pubs[col] = "N/A"
+        
+        df_profiles = pd.read_csv(PROFILES_FILE)
+        df_profiles['ORCID_ID'] = df_profiles['ORCID_ID'].astype(str).str.strip()
+        df_profiles['Name'] = df_profiles['Name'].astype(str).str.strip()
+        
+        url_map = dict(zip(df_profiles['ORCID_ID'], df_profiles['Hopkins_Profile_URL']))
+        name_to_orcid = {f"{row['Name']} ({row['ORCID_ID']})": row['ORCID_ID'] 
+                         for _, row in df_profiles.iterrows()}
+        
+        return df_pubs, url_map, name_to_orcid
+    except Exception as e:
+        st.error(f"Error loading CSV files: {e}")
+        return None, None, None
 
 @st.cache_data
-def get_single_faculty_info(orcid_id, client_id, client_secret):
+def get_orcid_token(client_id, client_secret):
     try:
-        auth_res = requests.post("https://orcid.org/oauth/token", data={
+        res = requests.post("https://orcid.org/oauth/token", data={
             "client_id": client_id, "client_secret": client_secret,
             "grant_type": "client_credentials", "scope": "/read-public"
-        }).json()
-        token = auth_res.get("access_token")
+        })
+        return res.json().get("access_token")
+    except: return None
+
+@st.cache_data
+def get_full_faculty_details(orcid_id, token):
+    try:
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        
         p_res = requests.get(f"https://pub.orcid.org/v3.0/{orcid_id}/person", headers=headers).json()
         first = p_res.get('name', {}).get('given-names', {}).get('value', '')
         last = p_res.get('name', {}).get('family-name', {}).get('value', '')
-        
         e_res = requests.get(f"https://pub.orcid.org/v3.0/{orcid_id}/employments", headers=headers).json()
         org = "Independent"
         affiliations = e_res.get('affiliation-group', [])
         if affiliations:
             summ = affiliations[0].get('summaries', [{}])[0].get('employment-summary', {})
             org = summ.get('organization', {}).get('name', 'Unknown')
-            
-        return {"name": f"{first} {last}".strip(), "org": org, "first": first, "last": last}
-    except Exception:
-        return None
+        return {"name": f"{first} {last}".strip(), "org": org, "first": first, "last": last, "orcid": orcid_id}
+    except: return None
 
 @st.cache_data
 def scrape_jhm_by_url(url):
+    if not url or pd.isna(url): return "No profile URL provided.", []
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200: return "Profile missing.", []
         soup = BeautifulSoup(res.text, "html.parser")
-        
-        # 1. Biography
         bio_div = soup.find('div', {'id': 'overview'}) or \
                   soup.find('div', {'data-testid': 'profile-about-about_the_provider-content'})
         bio_txt = bio_div.get_text(separator=' ', strip=True) if bio_div else "Bio details missing."
-        
-        # 2. Education & Training
         edu_items = []
         seen = set()
         keywords = ["Fellowship", "Residency", "Medical Education", "Board Certifications", "Internship"]
-        
-        # We iterate through all <li> and <div> tags to find the labels
         for item in soup.find_all(['li', 'div', 'p']):
             text_content = item.get_text(separator=' ', strip=True)
-            
             for key in keywords:
                 if text_content.startswith(key) and key not in seen:
-                    # Clean the string: remove the keyword, colon, and extra whitespace
-                    # This automatically ignores the <span> tags and just gets the text
-                    clean_value = text_content.replace(key, "").strip(": ").strip()
-                    
-                    # Prevent grabbing massive blocks (stop at the next category if merged)
-                    for k in keywords:
-                        clean_value = clean_value.split(k)[0].strip()
-                    
-                    if len(clean_value) > 2:
-                        edu_items.append(f"{key}: {clean_value}")
-                        seen.add(key) # Use key here so we only get ONE of each category
-                            
+                    clean_val = text_content.replace(key, "").strip(": ").strip()
+                    for k in keywords: clean_val = clean_val.split(k)[0].strip()
+                    if len(clean_val) > 2:
+                        edu_items.append(f"{key}: {clean_val}")
+                        seen.add(key)
         return bio_txt, edu_items
-    except Exception: 
-        return "Error loading profile.", []
+    except: return "Error loading profile.", []
+
+def generate_with_fallback(client, prompt, model_list):
+    for model_id in model_list:
+        try:
+            response = client.models.generate_content(model=model_id, contents=prompt)
+            return response, model_id
+        except: continue
+    return None, None
 
 # --- 3. MAIN EXECUTION ---
-df = load_local_data(FILE_PATH)
+df_pubs, url_map, name_to_orcid = load_data()
 
-if df is not None:
-    # --- 4. SIDEBAR ---
+if df_pubs is not None:
+    token = get_orcid_token(ORCID_CLIENT_ID, ORCID_CLIENT_SECRET)
+    
     with st.sidebar:
         st.header("Settings")
-        gemini_key = st.text_input("Gemini API Key", type="password", key="gemini_key_input")
-        
+        gemini_key = st.text_input("Gemini API Key", type="password")
         st.divider()
         st.header("Researcher Selection")
-        all_orcids = sorted(df['ORCID'].unique().tolist())
-        selected_orcid = st.selectbox("Select ORCID", options=all_orcids, key="orcid_selector")
+        selected_display_names = st.multiselect("Select Researchers", options=sorted(list(name_to_orcid.keys())))
+        selected_orcids = [name_to_orcid[name] for name in selected_display_names]
         
-        # 1. Automatically detect the current year
         current_year = datetime.now().year
-        # 2. Calculate the start year for a 5-year window (e.g., 2022 to 2026)
         five_years_ago = current_year - 4 
-
         st.divider()
+        year_range = st.slider("Year Range", min_value=int(df_pubs['Year'].min()), 
+                               max_value=current_year, value=(five_years_ago, current_year))
+        search_query = st.text_input("Filter Titles/Abstracts", "").lower()
 
-        # 3. Apply the dynamic values to the slider
-        year_range = st.slider(
-            "Year Range", 
-            min_value=int(df['Year'].min()), 
-            max_value=current_year, 
-            value=(five_years_ago, current_year)
-        )
+    if selected_orcids:
+        all_ai_context = [] 
 
-        search_query = st.text_input("Filter Titles", "").lower()
+        for orcid in selected_orcids:
+            faculty = get_full_faculty_details(orcid, token)
+            if faculty:
+                with st.expander(f"👤 {faculty['name']} - {faculty['org']}", expanded=True):
+                    col1, col2 = st.columns([1, 1])
+                    with col1: st.metric("Organization", faculty['org'])
+                    with col2: st.metric("ORCID ID", orcid)
 
-    faculty = get_single_faculty_info(selected_orcid, ORCID_CLIENT_ID, ORCID_CLIENT_SECRET)
+                    jhu_url = url_map.get(orcid)
+                    bio, edu_list = scrape_jhm_by_url(jhu_url)
+                    if jhu_url: st.markdown(f"🔗 **Source Profile:** [{jhu_url}]({jhu_url})")
+                    
+                    st.subheader("Biography")
+                    st.write(bio)
+                    
+                    mask = (df_pubs['ORCID'] == str(orcid)) & \
+                           (df_pubs['Year'] >= year_range[0]) & (df_pubs['Year'] <= year_range[1])
+                    if search_query:
+                        mask &= (df_pubs['Title'].str.contains(search_query, case=False, na=False)) | \
+                                (df_pubs['Abstract'].str.contains(search_query, case=False, na=False))
+                        
+                    current_pub_df = df_pubs[mask].copy().sort_values("Year", ascending=False)
+                    current_pub_df.insert(0, "No.", range(1, len(current_pub_df) + 1))
 
-    if faculty:
-        # --- 5. TOP LEVEL INFO ---
-        st.title(f"Faculty Profile: {faculty['name']}")
+                    st.subheader(f"Publications ({len(current_pub_df)})")
+                    st.dataframe(
+                        current_pub_df[["No.", "Year", "Title", "Authors", "Abstract", "PubMed Link"]],
+                        column_config={
+                            "PubMed Link": st.column_config.LinkColumn("Link"),
+                            "Abstract": st.column_config.Column(width="large"),
+                        },
+                        hide_index=True, use_container_width=True
+                    )
+
+                    # --- REVISED Context for AI ---
+                    researcher_context = f"RESEARCHER: {faculty['name']}\n"
+                    researcher_context += f"Bio: {bio}\n"
+                    researcher_context += f"Training: {', '.join(edu_list) if edu_list else 'N/A'}\n"
+                    researcher_context += "Key Publications:\n"
+                    
+                    for _, row in current_pub_df.head(8).iterrows():
+                        researcher_context += f"- YEAR: {row['Year']}\n"
+                        researcher_context += f"  TITLE: {row['Title']}\n"
+                        researcher_context += f"  AUTHORS: {row['Authors']}\n"  # Added Author List
+                        researcher_context += f"  ABSTRACT SAMPLE: {row['Abstract'][:400]}...\n\n"
+                    
+                    all_ai_context.append(researcher_context)
+                    st.divider()
         
-        # Row 1: Organization
-        st.metric("Organization", faculty['org'])
-        
-        # Row 2: ORCID ID
-        st.metric("ORCID ID", selected_orcid)
-        
-        st.divider()
-
-        # Scrape Info
-        f_slug = faculty['first'].lower().replace(" ", "-")
-        l_slug = faculty['last'].lower().replace(" ", "-")
-        jhu_url = f"https://profiles.hopkinsmedicine.org/provider/{f_slug}-{l_slug}/2703089"
-        bio, edu_list = scrape_jhm_by_url(jhu_url)
-
-        # --- 6. BIO & EDUCATION (Sequential Rows) ---
-        st.markdown(f"🔗 **Source Profile:** [{jhu_url}]({jhu_url})")
-        
-        st.subheader("Biography")
-        st.write(bio)
-        
-        st.write("") 
-        st.subheader("Education & Training")
-        if edu_list:
-            for item in edu_list:
-                st.markdown(f"• **{item}**")
-        else:
-            st.info("Detailed education records not found on the profile.")
-        st.divider()
-
-        # --- 7. PUBLICATIONS ---
-        mask = (df['ORCID'] == str(selected_orcid)) & \
-               (df['Year'] >= year_range[0]) & (df['Year'] <= year_range[1])
-        
-        if search_query:
-            mask &= df['Title'].str.contains(search_query, case=False, na=False)
-            
-        pub_df = df[mask].copy().sort_values("Year", ascending=False)
-        pub_df.insert(0, "No.", range(1, len(pub_df) + 1))
-
-        st.subheader(f"Publications ({len(pub_df)})")
-        st.dataframe(
-            pub_df[["No.", "Year", "Title", "Abstract", "PubMed Link"]],
-            column_config={
-                "No.": st.column_config.Column(width="small"),
-                "Year": st.column_config.NumberColumn(format="%d", width="small"),
-                "Title": st.column_config.Column(width=800), # Or a pixel value like 400
-                "Abstract": st.column_config.Column(width=1600), # Or 600+
-                "PubMed Link": st.column_config.LinkColumn("Link"),
-            },
-            hide_index=True, use_container_width=True
-        )
-
-        # --- 8. GEMINI AI SECTION ---
-        st.divider()
-        st.header(f"🤖 AI Research Insights")
-        
+        # --- 6. AI SECTION ---
+        st.header(f"🤖 AI Research Insights & Chat")
         if not gemini_key:
             st.info("👈 Please enter your Gemini API key in the sidebar.")
-        else:
+        elif all_ai_context:
             try:
                 client = genai.Client(api_key=gemini_key)
-                model_id = "gemini-2.5-flash" # Updated to flash for speed
+                models_to_try = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"]
+                full_history = "\n\n---\n\n".join(all_ai_context)
+                
+                # --- INITIAL SUMMARY ---
+                current_selection_key = "-".join(selected_orcids)
+                if "gemini_summary" not in st.session_state or st.session_state.get('cur_selection') != current_selection_key:
+                    with st.spinner("Gemini is analyzing the group..."):
+                        prompt = f"Summarize these researchers and shared themes based on this data: {full_history}"
+                        response, success_model = generate_with_fallback(client, prompt, models_to_try)
+                        if response:
+                            st.session_state.gemini_summary = response.text
+                            st.session_state.active_model = success_model
+                            st.session_state.cur_selection = current_selection_key
+                
+                if "gemini_summary" in st.session_state:
+                    st.caption(f"Status: Connected via **{st.session_state.get('active_model')}**")
+                    st.info(st.session_state.gemini_summary)
 
-                # Prepare context
-                context_parts = [f"Name: {faculty['name']}", f"Bio: {bio}", f"Training: {', '.join(edu_list)}"]
-                for _, row in pub_df.iterrows():
-                    context_parts.append(f"({row['Year']}) {row['Title']}: {row.get('Abstract', 'N/A')}")
-                full_history = "\n\n".join(context_parts)
-                
-                # Summary with Session Caching
-                if "gemini_summary" not in st.session_state or st.session_state.get('cur_orcid') != selected_orcid:
-                    with st.spinner("Gemini is analyzing the full history..."):
-                        prompt = f"Provide a professional 4-5 sentence summary of {faculty['name']}'s research and background. Context: {full_history}"
-                        response = client.models.generate_content(model=model_id, contents=prompt)
-                        st.session_state.gemini_summary = response.text
-                        st.session_state.cur_orcid = selected_orcid
-                
-                st.info(st.session_state.gemini_summary)
-                
-                # Chat Interface
-                st.write("---")
-                if "gemini_chat" not in st.session_state: st.session_state.gemini_chat = []
-                
-                for msg in st.session_state.gemini_chat:
-                    with st.chat_message(msg["role"]): st.markdown(msg["content"])
+                # --- CHAT INTERFACE (RESTORED) ---
+                st.write("### Chat with AI about these researchers")
+                if "group_chat" not in st.session_state:
+                    st.session_state.group_chat = []
 
-                if user_q := st.chat_input("Ask a question about this researcher..."):
-                    st.session_state.gemini_chat.append({"role": "user", "content": user_q})
-                    with st.chat_message("user"): st.markdown(user_q)
+                # Display chat history
+                for msg in st.session_state.group_chat:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+                # Handle new user input
+                if user_q := st.chat_input("Ask a follow-up question..."):
+                    st.session_state.group_chat.append({"role": "user", "content": user_q})
+                    with st.chat_message("user"):
+                        st.markdown(user_q)
                     
                     with st.chat_message("assistant"):
-                        chat_prompt = f"Context: {full_history}\n\nQuestion: {user_q}"
-                        chat_res = client.models.generate_content(model=model_id, contents=chat_prompt)
-                        st.markdown(chat_res.text)
-                        st.session_state.gemini_chat.append({"role": "assistant", "content": chat_res.text})
-            
+                        chat_prompt = f"Context of Researchers:\n{full_history}\n\nQuestion: {user_q}"
+                        res, chat_model = generate_with_fallback(client, chat_prompt, models_to_try)
+                        if res:
+                            st.markdown(res.text)
+                            st.session_state.group_chat.append({"role": "assistant", "content": res.text})
+                        else:
+                            st.error("Model unavailable for chat.")
+                
             except Exception as e:
-                st.error(f"Gemini AI Error: {e}")
+                st.error(f"Gemini API Error: {e}")
 else:
-    st.error("Data file (pubs.csv) not found.")
+    st.error("Data files not found.")
