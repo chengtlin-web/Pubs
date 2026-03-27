@@ -10,7 +10,7 @@ from google import genai
 st.set_page_config(page_title="FacultyScan Multi-Compare", layout="wide", page_icon="🧬")
 ORCID_CLIENT_ID = 'APP-VYOKD26NG7YD3EPW'
 ORCID_CLIENT_SECRET = '51ffc00e-d65c-4e64-8073-cefb9357a813'
-PUBS_FILE = "data/pubs3.csv"
+PUBS_FILE = "data/pubs4.csv"
 PROFILES_FILE = "data/profiles.csv"
 
 # --- 2. DATA ENGINES ---
