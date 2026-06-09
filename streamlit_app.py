@@ -110,14 +110,15 @@ def scrape_jhm_by_url(url):
         return bio_txt, edu_items
     except: return "Error loading profile.", []
 
-def generate_with_fallback(client, prompt, model_list):
+def generate_stream_with_fallback(client, prompt, model_list):
     for model_id in model_list:
         try:
-            response = client.models.generate_content(model=model_id, contents=prompt)
-            return response, model_id
-        except: continue
+            # client.models.generate_content_stream returns an iterable generator object
+            response_stream = client.models.generate_content_stream(model=model_id, contents=prompt)
+            return response_stream, model_id
+        except: 
+            continue
     return None, None
-
 # --- 3. MAIN EXECUTION ---
 df_pubs, url_map, name_to_orcid = load_data()
 
@@ -244,24 +245,38 @@ if df_pubs is not None:
                 report_loaded_flag = "report-yes" if report_data_str else "report-no"
                 cache_key = f"{current_selection_key}_{report_loaded_flag}"
                 
-                if "gemini_summary" not in st.session_state or st.session_state.get('cur_selection') != current_selection_key:
-                    with st.spinner("Gemini is analyzing the group..."):
-                        ### NEW: Enhanced prompt with cross-referencing instructions
-                        prompt = f"Summarize these researchers based on this data:\n{full_history}"
-                        if report_data_str:
-                            prompt += (
-                                f"{report_context}\n"
-                                "INSTRUCTION: Cross-reference researchers with the Faculty Report data. "
-                                "If a match is found, provide a separate summary of their academic activity from the report."
-                            )
+                # [STREAMING NEW] Fixed caching assignment rule so it evaluation points to 'cache_key' instead of 'current_selection_key'
+                if "gemini_summary" not in st.session_state or st.session_state.get('cur_selection') != cache_key:
+                    prompt = f"Summarize these researchers based on this data:\n{full_history}"
+                    if report_data_str:
+                        prompt += (
+                            f"{report_context}\n"
+                            "INSTRUCTION: Cross-reference researchers with the Faculty Report data. "
+                            "If a match is found, provide a separate summary of their academic activity from the report."
+                        )
+                    
+                    # [STREAMING NEW] Call streaming model fallback logic
+                    response_stream, success_model = generate_stream_with_fallback(client, prompt, models_to_try)
+                    if response_stream:
+                        st.session_state.active_model = success_model
+                        st.session_state.cur_selection = cache_key
                         
-                        response, success_model = generate_with_fallback(client, prompt, models_to_try)
-                        if response:
-                            st.session_state.gemini_summary = response.text
-                            st.session_state.active_model = success_model
-                            st.session_state.cur_selection = current_selection_key
+                        st.caption(f"Status: Streaming via **{success_model}**")
+                        
+                        # [STREAMING NEW] Created an isolated sub-generator function to isolate text values from Gemini chunk blocks
+                        def chunk_generator():
+                            for chunk in response_stream:
+                                yield chunk.text
+                        
+                        # [STREAMING NEW] Utilized st.write_stream to draw the characters out cleanly token-by-token
+                        with st.info("Analyzing..."):
+                            full_text = st.write_stream(chunk_generator())
+                        
+                        # Store final built text string inside the session state cache
+                        st.session_state.gemini_summary = full_text
+                        st.rerun() # [STREAMING NEW] Forces container redraw to switch from the loading view to the final layout block
                 
-                if "gemini_summary" in st.session_state:
+                elif "gemini_summary" in st.session_state:
                     st.caption(f"Status: Connected via **{st.session_state.get('active_model')}**")
                     st.info(st.session_state.gemini_summary)
 
@@ -283,10 +298,18 @@ if df_pubs is not None:
                     
                     with st.chat_message("assistant"):
                         chat_prompt = f"Context of Researchers:\n{full_history}\n{report_context}\n\nQuestion: {user_q}"
-                        res, chat_model = generate_with_fallback(client, chat_prompt, models_to_try)
-                        if res:
-                            st.markdown(res.text)
-                            st.session_state.group_chat.append({"role": "assistant", "content": res.text})
+                        
+                        # [STREAMING NEW] Replaced traditional chat evaluation block with a streaming generator 
+                        res_stream, chat_model = generate_stream_with_fallback(client, chat_prompt, models_to_try)
+                        if res_stream:
+                            # [STREAMING NEW] Extracts text fields from chunks inside the active dialogue window
+                            def chat_chunk_generator():
+                                for chunk in res_stream:
+                                    yield chunk.text
+                            
+                            # [STREAMING NEW] Renders real-time text output dynamically inside the active chat layout block
+                            streamed_response = st.write_stream(chat_chunk_generator())
+                            st.session_state.group_chat.append({"role": "assistant", "content": streamed_response})
                         else:
                             st.error("Model unavailable for chat.")
                 
