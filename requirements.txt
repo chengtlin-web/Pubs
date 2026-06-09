@@ -3,3 +3,8 @@ bs4
 google
 google-genai
 openai
+
+pandas
+numpy
+requests
+openpyxl
