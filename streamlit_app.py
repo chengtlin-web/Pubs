@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import io
 from datetime import datetime
 from bs4 import BeautifulSoup
 from google import genai 
@@ -12,9 +13,9 @@ ORCID_CLIENT_ID = 'APP-VYOKD26NG7YD3EPW'
 ORCID_CLIENT_SECRET = '51ffc00e-d65c-4e64-8073-cefb9357a813'
 PUBS_FILE = "data/pubs4.csv"
 PROFILES_FILE = "data/profiles.csv"
+REPORT_URL = "https://livejohnshopkins-my.sharepoint.com/:x:/r/personal/clin97_jh_edu/Documents/Research%20Data/Faculty/Clinical%20Academic%20Annual%20Report%20Sample%20Data.xlsx?d=w213027e166ef4b03a08a4dcebbb3cdde&csf=1&web=1&e=dFFM6c"
 
 # --- 2. DATA ENGINES ---
-
 @st.cache_data
 def load_data():
     try:
@@ -39,6 +40,23 @@ def load_data():
     except Exception as e:
         st.error(f"Error loading CSV files: {e}")
         return None, None, None
+
+@st.cache_data
+def load_sharepoint_report(url):
+    try:
+        # Transform standard sharing URL to direct download URL
+        download_url = url.replace(":x:/r/", ":x:/d/").split("?")[0] + "?download=1"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(download_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            # Read bytes into Pandas
+            df = pd.read_excel(io.BytesIO(response.content))
+            return df.to_csv(index=False), None
+        else:
+            return None, "Access Denied"
+    except Exception as e:
+        return None, str(e)
 
 @st.cache_data
 def get_orcid_token(client_id, client_secret):
@@ -109,6 +127,34 @@ if df_pubs is not None:
     with st.sidebar:
         st.header("Settings")
         gemini_key = st.text_input("Gemini API Key", type="password")
+
+# --- NEW TAB LAYOUT IN SIDEBAR ---
+        st.subheader("📊 Faculty Reports")
+        report_tab1, report_tab2 = st.tabs(["Link Status", "Direct Data Injection"])
+        
+        report_data_str = None
+        
+        with report_tab1:
+            st.markdown(f"🔗 [Open SharePoint Report]({REPORT_URL})")
+            # Try background fetch
+            res_str, report_error = load_sharepoint_report(REPORT_URL)
+            if res_str:
+                st.success("✅ Background sync active.")
+                report_data_str = res_str
+            else:
+                st.error("🔒 Cloud access blocked by JHM Authentication.")
+                
+        with report_tab2:
+            st.caption("If cloud sync is blocked, drag the sheet here directly:")
+            uploaded_file = st.file_uploader("Upload Faculty Report", type=["xlsx"], label_visibility="collapsed")
+            if uploaded_file:
+                try:
+                    df_uploaded = pd.read_excel(uploaded_file)
+                    report_data_str = df_uploaded.to_csv(index=False)
+                    st.success("💪 Data successfully injected into LLM memory!")
+                except Exception as e:
+                    st.error(f"Parsing error: {e}")
+
         st.divider()
         st.header("Researcher Selection")
         selected_display_names = st.multiselect("Select Researchers", options=sorted(list(name_to_orcid.keys())))
@@ -183,11 +229,32 @@ if df_pubs is not None:
                 models_to_try = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"]
                 full_history = "\n\n---\n\n".join(all_ai_context)
                 
+                report_context = ""
+                if report_data_str:
+                    report_context = (
+                        "\n\n=========================================\n"
+                        "ADDITIONAL DATA SOURCE: FACULTY ACADEMIC ANNUAL REPORTS\n"
+                        f"{report_data_str}\n"
+                        "=========================================\n"
+                    )
+                
                 # --- INITIAL SUMMARY ---
                 current_selection_key = "-".join(selected_orcids)
+                # ### NEW: Cache key now includes report status to force refresh if access changes
+                report_loaded_flag = "report-yes" if report_data_str else "report-no"
+                cache_key = f"{current_selection_key}_{report_loaded_flag}"
+                
                 if "gemini_summary" not in st.session_state or st.session_state.get('cur_selection') != current_selection_key:
                     with st.spinner("Gemini is analyzing the group..."):
-                        prompt = f"Summarize these researchers and shared themes based on this data: {full_history}"
+                        ### NEW: Enhanced prompt with cross-referencing instructions
+                        prompt = f"Summarize these researchers based on this data:\n{full_history}"
+                        if report_data_str:
+                            prompt += (
+                                f"{report_context}\n"
+                                "INSTRUCTION: Cross-reference researchers with the Faculty Report data. "
+                                "If a match is found, provide a separate summary of their academic activity from the report."
+                            )
+                        
                         response, success_model = generate_with_fallback(client, prompt, models_to_try)
                         if response:
                             st.session_state.gemini_summary = response.text
@@ -215,7 +282,7 @@ if df_pubs is not None:
                         st.markdown(user_q)
                     
                     with st.chat_message("assistant"):
-                        chat_prompt = f"Context of Researchers:\n{full_history}\n\nQuestion: {user_q}"
+                        chat_prompt = f"Context of Researchers:\n{full_history}\n{report_context}\n\nQuestion: {user_q}"
                         res, chat_model = generate_with_fallback(client, chat_prompt, models_to_try)
                         if res:
                             st.markdown(res.text)
